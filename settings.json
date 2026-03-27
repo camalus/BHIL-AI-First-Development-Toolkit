@@ -1,0 +1,113 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npx promptfoo eval *)",
+      "Bash(npx ruflo *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(./tools/scripts/*.sh)",
+      "Read(**)",
+      "Write(src/**)",
+      "Write(tests/**)",
+      "Write(evals/**)",
+      "Write(project/**)",
+      "Write(docs/**)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force *)",
+      "Write(.claude/settings.json)",
+      "Write(docs/adr/**)"
+    ]
+  },
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": { "tool_name": "Write", "file_paths": ["src/**/*.ts", "src/**/*.js"] },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx prettier --write \"${file}\" 2>/dev/null && npx eslint --fix \"${file}\" 2>/dev/null",
+            "description": "Auto-format and lint after every TypeScript/JavaScript write"
+          }
+        ]
+      },
+      {
+        "matcher": { "tool_name": "Write", "file_paths": ["**/*.md"] },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tools/scripts/validate-frontmatter.js \"${file}\" 2>/dev/null || true",
+            "description": "Validate YAML frontmatter on every artifact write"
+          }
+        ]
+      },
+      {
+        "matcher": { "tool_name": "Write", "file_paths": ["src/**"] },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run test:arch -- --silent 2>/dev/null | tail -5 || true",
+            "description": "Run architecture compliance check after source file changes"
+          }
+        ]
+      }
+    ],
+
+    "PreToolUse": [
+      {
+        "matcher": { "tool_name": "Write", "file_paths": ["docs/adr/**"] },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'ADR files are immutable once accepted. Use new-adr.sh to create a superseding ADR.' && exit 2",
+            "description": "Block direct modification of accepted ADRs"
+          }
+        ]
+      },
+      {
+        "matcher": { "tool_name": "Bash", "command_patterns": ["git push --force*"] },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Force push is not allowed.' && exit 2",
+            "description": "Block force pushes"
+          }
+        ]
+      }
+    ],
+
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p project/.sdlc/knowledge && echo \"Auto-compact triggered at $(date)\" >> project/.sdlc/knowledge/compaction-log.txt",
+            "description": "Log compaction events for session continuity tracking"
+          }
+        ]
+      }
+    ],
+
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Session ended. Remember to write progress.md before closing if implementation is incomplete.'",
+            "description": "Remind practitioner to document session progress"
+          }
+        ]
+      }
+    ]
+  },
+
+  "env": {
+    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
+  }
+}

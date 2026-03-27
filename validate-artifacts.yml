@@ -1,0 +1,114 @@
+name: Validate Artifacts
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'project/.sdlc/specs/**'
+      - 'docs/adr/**'
+      - 'templates/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'project/.sdlc/specs/**'
+      - 'docs/adr/**'
+
+jobs:
+  validate-artifacts:
+    name: Validate artifact frontmatter and traceability
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Make scripts executable
+        run: chmod +x tools/scripts/*.sh
+        
+      - name: Validate all artifacts
+        run: ./tools/scripts/validate-artifacts.sh --strict
+        
+      - name: Check ADR immutability
+        if: github.event_name == 'pull_request'
+        run: |
+          # Check that accepted ADRs were not modified
+          MODIFIED_ADRS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- docs/adr/ | head -20)
+          
+          if [ -n "$MODIFIED_ADRS" ]; then
+            echo "ADRs modified in this PR:"
+            echo "$MODIFIED_ADRS"
+            
+            for adr_file in $MODIFIED_ADRS; do
+              if [ -f "$adr_file" ]; then
+                status=$(grep "^status:" "$adr_file" | awk '{print $2}')
+                if [ "$status" = "accepted" ]; then
+                  echo "❌ ERROR: Accepted ADR was modified: $adr_file"
+                  echo "   Accepted ADRs are immutable. Create a new ADR that supersedes this one."
+                  exit 1
+                fi
+              fi
+            done
+            echo "✅ All modified ADRs are in draft/proposed status — OK"
+          fi
+
+  check-traceability:
+    name: Check artifact traceability chain
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Verify SPEC → PRD links
+        run: |
+          ERRORS=0
+          for spec in project/.sdlc/specs/SPEC-*.md; do
+            [ -f "$spec" ] || continue
+            parent=$(grep "^parent:" "$spec" | awk '{print $2}')
+            if [ -n "$parent" ]; then
+              if ! ls "project/.sdlc/specs/${parent}"*.md >/dev/null 2>&1; then
+                echo "❌ Broken PRD reference in $spec: $parent"
+                ERRORS=$((ERRORS+1))
+              fi
+            fi
+          done
+          [ "$ERRORS" -eq 0 ] && echo "✅ All SPEC → PRD links valid"
+          [ "$ERRORS" -gt 0 ] && exit 1
+          
+      - name: Verify TASK → SPEC links
+        run: |
+          ERRORS=0
+          for task in project/.sdlc/specs/TASK-*.md; do
+            [ -f "$task" ] || continue
+            spec=$(grep "^spec:" "$task" | awk '{print $2}')
+            if [ -n "$spec" ]; then
+              if ! ls "project/.sdlc/specs/${spec}"*.md >/dev/null 2>&1; then
+                echo "❌ Broken SPEC reference in $task: $spec"
+                ERRORS=$((ERRORS+1))
+              fi
+            fi
+          done
+          [ "$ERRORS" -eq 0 ] && echo "✅ All TASK → SPEC links valid"
+          [ "$ERRORS" -gt 0 ] && exit 1
+
+  validate-pr-template:
+    name: Check PR description completeness
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Check PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const required = [
+              'Specification alignment',
+              'Architecture compliance',
+              'Test quality',
+            ];
+            const missing = required.filter(section => !body.includes(section));
+            if (missing.length > 0) {
+              core.warning(`PR description missing sections: ${missing.join(', ')}`);
+              core.warning('Please use the PR template from .github/PULL_REQUEST_TEMPLATE.md');
+            }

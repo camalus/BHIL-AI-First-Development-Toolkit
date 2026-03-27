@@ -1,0 +1,147 @@
+name: LLM Evaluation Suite
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'project/prompts/**'
+      - 'evals/**'
+  workflow_dispatch:
+    inputs:
+      feature:
+        description: 'Feature eval suite to run (e.g., rag-chat)'
+        required: false
+        default: 'all'
+
+jobs:
+  run-evals:
+    name: Run LLM evaluation suite
+    runs-on: ubuntu-latest
+    
+    # Only run if evals directory exists and has suite files
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Check for eval suites
+        id: check-evals
+        run: |
+          if ls evals/*.yaml >/dev/null 2>&1; then
+            echo "has_evals=true" >> $GITHUB_OUTPUT
+            echo "Found eval suites:"
+            ls evals/*.yaml
+          else
+            echo "has_evals=false" >> $GITHUB_OUTPUT
+            echo "No eval suites found — skipping"
+          fi
+          
+      - name: Run eval suites
+        if: steps.check-evals.outputs.has_evals == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          FEATURE="${{ github.event.inputs.feature || 'all' }}"
+          RESULTS_DIR="evals/results/ci-$(date +%Y%m%d-%H%M%S)"
+          mkdir -p "$RESULTS_DIR"
+          
+          FAILED_SUITES=0
+          
+          if [ "$FEATURE" = "all" ]; then
+            SUITES=$(ls evals/*.yaml 2>/dev/null)
+          else
+            SUITES="evals/${FEATURE}.yaml"
+          fi
+          
+          for suite in $SUITES; do
+            [ -f "$suite" ] || continue
+            suite_name=$(basename "$suite" .yaml)
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Running eval suite: $suite_name"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            npx promptfoo eval \
+              --config "$suite" \
+              --output "${RESULTS_DIR}/${suite_name}.json" \
+              --no-cache \
+              2>&1 | tee "${RESULTS_DIR}/${suite_name}.log"
+              
+            EXIT_CODE=${PIPESTATUS[0]}
+            if [ "$EXIT_CODE" -ne 0 ]; then
+              echo "❌ Eval suite FAILED: $suite_name"
+              FAILED_SUITES=$((FAILED_SUITES+1))
+            else
+              echo "✅ Eval suite PASSED: $suite_name"
+            fi
+          done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Eval Summary: $FAILED_SUITES suite(s) failed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          [ "$FAILED_SUITES" -gt 0 ] && exit 1
+          exit 0
+          
+      - name: Upload eval results
+        if: always() && steps.check-evals.outputs.has_evals == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.sha }}
+          path: evals/results/
+          retention-days: 30
+          
+      - name: Comment eval results on PR
+        if: github.event_name == 'pull_request' && steps.check-evals.outputs.has_evals == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const resultsDir = 'evals/results';
+            
+            let comment = '## 🧪 LLM Evaluation Results\n\n';
+            
+            const dirs = fs.readdirSync(resultsDir).filter(d => d.startsWith('ci-'));
+            if (dirs.length === 0) {
+              comment += 'No results found.';
+            } else {
+              const latestDir = dirs.sort().reverse()[0];
+              const files = fs.readdirSync(`${resultsDir}/${latestDir}`)
+                .filter(f => f.endsWith('.json'));
+                
+              for (const file of files) {
+                const suiteName = file.replace('.json', '');
+                comment += `### ${suiteName}\n`;
+                
+                try {
+                  const results = JSON.parse(
+                    fs.readFileSync(`${resultsDir}/${latestDir}/${file}`, 'utf8')
+                  );
+                  const total = results.results?.length || 0;
+                  const passed = results.results?.filter(r => r.success).length || 0;
+                  const passRate = total > 0 ? ((passed/total)*100).toFixed(1) : 'N/A';
+                  
+                  comment += `- Tests: ${passed}/${total} passed (${passRate}%)\n`;
+                  comment += `- Status: ${passed === total ? '✅ PASSED' : '❌ FAILED'}\n\n`;
+                } catch(e) {
+                  comment += `- Unable to parse results\n\n`;
+                }
+              }
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
